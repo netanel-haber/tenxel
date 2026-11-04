@@ -473,7 +473,8 @@ static int peek(const u8 *p, const u8 *end, size_t *n) {
  * whether the last byte opens a comment or is a %: depends on the next.
  * store_classes(): the default classes, XORed with bit planes. */
 typedef struct {
-    u64 ident, digit, dot, space, newline;
+    u64 ident, digit, dot, space, newline, paren;
+    u64 keyword_first; /* _ and the lowercase letters that start keywords: abcdefgilnrstuvw */
     u64 special; /* what blocks leave to lex_token: " ' # \ $ NUL, bytes from 0x80, and the starts of // /" "* %: */
 } Masks;
 
@@ -515,6 +516,12 @@ static inline void half_masks(__m256i v, __m256i next, u64 *m, __m256i *def) {
     __m256i high = _mm256_and_si256(_mm256_srli_epi16(v, 4), _mm256_set1_epi8(0x0F));
     __m256i kind = _mm256_and_si256(_mm256_shuffle_epi8(by_low, v), _mm256_shuffle_epi8(by_high, high));
     __m256i not_word = _mm256_cmpeq_epi8(kind, _mm256_setzero_si256());
+    /* Keyword first letters by nibbles: bit 1 is row 6, 2 row 7 and 4 the _ in row 5 */
+    const __m256i first_low = _mm256_setr_epi8(0, 1, 3, 3, 3, 3, 3, 3, 0, 1, 0, 0, 1, 0, 1, 4, 0, 1, 3, 3, 3, 3, 3, 3,
+                                               0, 1, 0, 0, 1, 0, 1, 4);
+    const __m256i first_high = _mm256_setr_epi8(0, 0, 0, 0, 0, 4, 1, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 1, 2,
+                                                0, 0, 0, 0, 0, 0, 0, 0);
+    __m256i first = _mm256_and_si256(_mm256_shuffle_epi8(first_low, v), _mm256_shuffle_epi8(first_high, high));
     __m256i space = lookup_eq(v, spaces);
 
     __m256i special = _mm256_or_si256(lookup_eq(v, specials), v); /* v: its sign bit marks bytes from 0x80 */
@@ -527,6 +534,8 @@ static inline void half_masks(__m256i v, __m256i next, u64 *m, __m256i *def) {
     m[3] = mask32(space);
     m[4] = mask32(_mm256_or_si256(eq(v, '\n'), eq(v, '\r')));
     m[5] = mask32(special);
+    m[6] = mask32(eq(v, '('));
+    m[7] = ~mask32(_mm256_cmpeq_epi8(first, _mm256_setzero_si256())) & 0xFFFFFFFF;
     *def =
         _mm256_andnot_si256(space, _mm256_blendv_epi8(_mm256_set1_epi8(C_IDENT), _mm256_set1_epi8(C_PUNCT), not_word));
 }
@@ -534,8 +543,8 @@ static inline void half_masks(__m256i v, __m256i next, u64 *m, __m256i *def) {
 static inline void block_masks(const u8 *p, Masks *m, Block *def) {
     Block v = vec_load(p);
     Block next = vec_load(p + 1);
-    u64 x[6];
-    u64 y[6];
+    u64 x[8];
+    u64 y[8];
     half_masks(v.a, next.a, x, &def->a);
     half_masks(v.b, next.b, y, &def->b);
     m->ident = x[0] | y[0] << 32;
@@ -544,6 +553,8 @@ static inline void block_masks(const u8 *p, Masks *m, Block *def) {
     m->space = x[3] | y[3] << 32;
     m->newline = x[4] | y[4] << 32;
     m->special = x[5] | y[5] << 32;
+    m->paren = x[6] | y[6] << 32;
+    m->keyword_first = x[7] | y[7] << 32;
 }
 
 /* 0xFF in each byte whose bit in m is set */
@@ -599,6 +610,8 @@ static inline void block_masks(const u8 *p, Masks *m, Block *def) {
             m->digit |= bit;
         if (c == '.')
             m->dot |= bit;
+        if (c == '(')
+            m->paren |= bit;
         if (is_hspace(c) || is_newline(c))
             m->space |= bit;
         if (is_newline(c))
@@ -608,6 +621,7 @@ static inline void block_masks(const u8 *p, Masks *m, Block *def) {
         if ((c == '/' && (next == '/' || next == '*')) || (c == '%' && next == ':'))
             m->special |= bit;
     }
+    m->keyword_first = m->ident; /* a filter: here, no filter */
     *def = p;
 }
 
@@ -1130,6 +1144,14 @@ static const u8 *directive(Lexer *L, const u8 *p) {
 
 /* ---- blocks of plain code ---- */
 
+/* x with its bit order reversed, so that a carry runs from high bits to low ones */
+static inline u64 reverse_bits(u64 x) {
+    x = __builtin_bswap64(x);
+    x = (x >> 4 & 0x0F0F0F0F0F0F0F0FULL) | (x & 0x0F0F0F0F0F0F0F0FULL) << 4;
+    x = (x >> 2 & 0x3333333333333333ULL) | (x & 0x3333333333333333ULL) << 2;
+    return (x >> 1 & 0x5555555555555555ULL) | (x & 0x5555555555555555ULL) << 1;
+}
+
 /* The bytes right after a backslash run of odd length: the escaped ones, by simdjson's trick. A run that reaches byte
  * 63 escapes a byte of the next block, where no literal of this block reaches. */
 static inline u64 escaped_by(u64 backslash) {
@@ -1255,34 +1277,53 @@ static inline unsigned code_block(Lexer *L, const u8 *b, const u8 *real, u8 *o, 
     u64 word_starts = word & ~(word << 1);
     u64 word_ends = word & ~(word >> 1);
     u64 skip = m.space | comments;
-    u64 next = (skip + (word_ends << 1)) & ~skip; /* after each word, the first byte that isn't a space or comment */
-    /* A special byte, or the byte before one (a slash before a splice), where a comment, splice or NUL may hide */
-    u64 unsure = (m.special & ~regions) | m.special >> 1 | (u64)(b[64] == '\\') << 63;
     u64 d0 = (number & m.ident) | (chars & region); /* the default class is C_IDENT, and C_CONSTANT is C_IDENT ^ 1 */
     u64 d1 = regions & ~comments;                   /* C_STRING and C_CHAR, on a cleared default */
     u64 d2 = regions & ~comments;
-    while (word_starts) {
-        unsigned s = (unsigned)__builtin_ctzll(word_starts);
-        unsigned e = (unsigned)__builtin_ctzll(word_ends);
-        unsigned a = next ? (unsigned)__builtin_ctzll(next) : 64;
-        word_starts &= word_starts - 1;
-        word_ends &= word_ends - 1;
-        next &= next - 1;
 
+    /* Functions: from each "(", back through spaces and comments, to the word there. With the bits reversed, that is
+     * a carry from each "(" through the spaces and comments before it, and then through the word it lands on. */
+    u64 rskip = reverse_bits(skip);
+    u64 rword = reverse_bits(word);
+    u64 rland = (rskip + (reverse_bits(m.paren & ~regions) << 1)) & ~rskip;
+    u64 functions = reverse_bits(rword & ~(rword + (rland & rword)));
+
+    /* A word followed by a byte where a comment the block didn't take, a splice or a NUL may hide needs lex_token's
+     * look: a special byte, or the byte before one (a slash before a splice) */
+    u64 next = (skip + (word_ends << 1)) & ~skip; /* after each word, the first byte that isn't a space or comment */
+    u64 unsure = (m.special & ~regions) | m.special >> 1 | (u64)(b[64] == '\\') << 63;
+    for (u64 u = next & unsure & ~m.paren; u; u &= u - 1) {
+        unsigned a = (unsigned)__builtin_ctzll(u);
+        unsigned e = 63 - (unsigned)__builtin_clzll(word_ends & ((1ULL << a) - 1));
+        u64 below = ~word & ((1ULL << e) - 1);
+        unsigned s = below ? 64 - (unsigned)__builtin_clzll(below) : 0;
+        if (real + a < L->end && paren_next(real + a, L->end))
+            functions |= (2ULL << e) - (1ULL << s);
+    }
+
+    /* Keywords, among the words of two or more characters that start like one. A keyword followed by "(" is still a
+     * keyword. */
+    u64 kw_starts = word_starts & ~word_ends & m.keyword_first;
+    u64 candidates = word & ~(word + kw_starts); /* adding a word's start bit carries through it */
+    u64 kw_ends = candidates & ~(candidates >> 1);
+    while (kw_starts) {
+        unsigned s = (unsigned)__builtin_ctzll(kw_starts);
+        unsigned e = (unsigned)__builtin_ctzll(kw_ends);
+        kw_starts &= kw_starts - 1;
+        kw_ends &= kw_ends - 1;
         int c = keyword_class(b + s, e - s + 1);
-        if (c == C_IDENT && b[a] == '(')
-            c = C_FUNCTION;
-        else if (c == C_IDENT && (unsure >> a & 1) && real + a < L->end && paren_next(real + a, L->end))
-            c = C_FUNCTION; /* a comment this block didn't take, a splice or a NUL might come first */
         if (c == C_IDENT)
             continue;
-
         unsigned x = (unsigned)c ^ C_IDENT;
         u64 bits = (2ULL << e) - (1ULL << s);
+        functions &= ~bits;
         d0 |= bits & -(u64)(x & 1);
         d1 |= bits & -(u64)(x >> 1 & 1);
         d2 |= bits & -(u64)(x >> 2 & 1);
     }
+    d0 |= functions; /* C_FUNCTION is C_IDENT ^ 7 */
+    d1 |= functions;
+    d2 |= functions;
     store_classes(o, def, d0, d1, d2, comments, regions);
     for (u64 dots = number & m.dot; dots; dots &= dots - 1) /* a dot's default class is C_PUNCT, not C_IDENT */
         o[__builtin_ctzll(dots)] = C_CONSTANT;
