@@ -4,7 +4,7 @@ A C lexer for syntax highlighting, in one C file. It gives every byte one of 11 
 
 ## Credit
 
-tenxel started as a sort of port of [lexnet](https://huggingface.co/alpindale/lexnet), a hand-built neural network by alpindale that highlights C. The first version rewrote the network as plain C and matched it byte for byte, mistakes included; it is kept at the tag `lexnet-exact`. tenxel has since moved to clang's rules and a different design, but the idea of classifying every byte, the 11 classes and the name (lexnet backwards) come from lexnet. tenxel is an independent project, not affiliated with lexnet or alpindale.
+tenxel started as a sort of port of [lexnet](https://huggingface.co/alpindale/lexnet), a hand-built neural network by alpindale that highlights C. The first version rewrote the network as plain C and matched it byte for byte, mistakes included; it is kept at the tag `lexnet-exact`. tenxel has since moved to clang's rules and a different design, but the idea of classifying every byte, the 11 classes and the name (lexnet backwards) come from lexnet.
 
 ## Use
 
