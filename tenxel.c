@@ -474,7 +474,7 @@ static int peek(const u8 *p, const u8 *end, size_t *n) {
  * store_classes(): the default classes, XORed with bit planes. */
 typedef struct {
     u64 ident, digit, dot, space, newline, paren;
-    u64 keyword_first; /* _ and the lowercase letters that start keywords: abcdefgilnrstuvw */
+    u64 keyword_first; /* bytes whose next one could follow it at the start of a keyword (no false negatives) */
     u64 special; /* what blocks leave to lex_token: " ' # \ $ NUL, bytes from 0x80, and the starts of // /" "* %: */
 } Masks;
 
@@ -522,6 +522,18 @@ static inline void half_masks(__m256i v, __m256i next, u64 *m, __m256i *def) {
     const __m256i first_high = _mm256_setr_epi8(0, 0, 0, 0, 0, 4, 1, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 1, 2,
                                                 0, 0, 0, 0, 0, 0, 0, 0);
     __m256i first = _mm256_and_si256(_mm256_shuffle_epi8(first_low, v), _mm256_shuffle_epi8(first_high, high));
+    /* The second letter of a keyword, the same way: 1 for row 6, 2 row 7, 4 row 4 and 8 row 5. Then 3 for one that
+     * can follow a first letter, and 4 for one that can follow a _, to match the first letter's bits. */
+    const __m256i second_low = _mm256_setr_epi8(0, 5, 6, 14, 14, 7, 5, 6, 3, 7, 0, 0, 1, 0, 5, 9, 0, 5, 6, 14, 14, 7, 5,
+                                                6, 3, 7, 0, 0, 1, 0, 5, 9);
+    const __m256i second_high = _mm256_setr_epi8(0, 0, 0, 0, 4, 8, 1, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 8, 1, 2,
+                                                 0, 0, 0, 0, 0, 0, 0, 0);
+    const __m256i follows = _mm256_setr_epi8(0, 3, 3, 3, 4, 7, 7, 7, 4, 7, 7, 7, 4, 7, 7, 7, 0, 3, 3, 3, 4, 7, 7, 7, 4,
+                                             7, 7, 7, 4, 7, 7, 7);
+    __m256i next_high = _mm256_and_si256(_mm256_srli_epi16(next, 4), _mm256_set1_epi8(0x0F));
+    __m256i second =
+        _mm256_and_si256(_mm256_shuffle_epi8(second_low, next), _mm256_shuffle_epi8(second_high, next_high));
+    first = _mm256_and_si256(first, _mm256_shuffle_epi8(follows, second));
     __m256i space = lookup_eq(v, spaces);
 
     __m256i special = _mm256_or_si256(lookup_eq(v, specials), v); /* v: its sign bit marks bytes from 0x80 */
@@ -1222,8 +1234,8 @@ static inline unsigned code_block(Lexer *L, const u8 *b, const u8 *real, u8 *o, 
     u64 comments = 0;
     u64 todo = m.special;
     if (todo) {
-        int c = b[__builtin_ctzll(todo)];
-        if (c == '"' || c == '\'' || c == '/')
+        unsigned q = (unsigned)__builtin_ctzll(todo);
+        if (b[q] == '"' || b[q] == '\'' || (b[q] == '/' && b[q + 1] == '/'))
             todo = block_literals(b, &m, todo, &strings, &chars, &comments);
     }
     u64 regions = strings | chars | comments;
@@ -1301,9 +1313,9 @@ static inline unsigned code_block(Lexer *L, const u8 *b, const u8 *real, u8 *o, 
             functions |= (2ULL << e) - (1ULL << s);
     }
 
-    /* Keywords, among the words of two or more characters that start like one. A keyword followed by "(" is still a
+    /* Keywords, among the words whose first two letters could start one. A keyword followed by "(" is still a
      * keyword. */
-    u64 kw_starts = word_starts & ~word_ends & m.keyword_first;
+    u64 kw_starts = word_starts & m.keyword_first;
     u64 candidates = word & ~(word + kw_starts); /* adding a word's start bit carries through it */
     u64 kw_ends = candidates & ~(candidates >> 1);
     while (kw_starts) {

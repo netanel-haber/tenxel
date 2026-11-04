@@ -21,10 +21,10 @@ Tokens match clang 19's raw lexer with `-std=gnu23`, including line splices, dig
 
 | Lexer | Time |
 |---|---|
-| tenxel | 2.9 cycles/byte |
-| [simd-lexing](https://github.com/Mateuszd6/simd-lexing), counting tokens only | 1.3× |
-| [stb_c_lexer](https://github.com/nothings/stb/blob/master/stb_c_lexer.h) | 2.6× |
-| clang 19, `clang_tokenize` | 6.0× |
+| tenxel | 2.7 cycles/byte |
+| [simd-lexing](https://github.com/Mateuszd6/simd-lexing), counting tokens only | 1.4× |
+| [stb_c_lexer](https://github.com/nothings/stb/blob/master/stb_c_lexer.h) | 2.9× |
+| clang 19, `clang_tokenize` | 6.7× |
 
 The others produce tokens rather than a class per byte. [buster](https://github.com/buster14a/buster)'s lexer needs AVX-512, which this CPU lacks; its authors report 2.0 cycles/byte on `sqlite3.c`.
 
