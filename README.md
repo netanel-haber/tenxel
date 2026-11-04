@@ -1,6 +1,6 @@
 # tenxel
 
-A C lexer for syntax highlighting in one C file. It gives every byte one of 11 classes, with the same token boundaries as clang, at about 0.6 ns per byte.
+A C lexer for syntax highlighting in one C file. It gives every byte one of 11 classes, with the same token boundaries as clang, at about 0.6 ns per byte on AVX2.
 
 It started as [lexnet](https://huggingface.co/alpindale/lexnet), a hand-built neural network that highlights C, rewritten as plain C. That version matched the network byte for byte, including its mistakes, and is kept at the tag `lexnet-exact`.
 
@@ -49,18 +49,21 @@ Named universal character names (`\N{LATIN SMALL LETTER A}`) are the one known d
 
 ## Performance
 
-Measured on an Intel i7-13800H with AVX2, capped at 2.9 GHz, on 715 KB of C (the original lexnet's C files and this repo's earlier ones, repeated), best of 40 calls of `tenxel_classify` on one performance core.
+Measured on an Intel i7-13800H with AVX2, capped at 2.9 GHz, on one performance core, best of up to 40 runs. The inputs are 715 KB of C (the original lexnet's C files and this repo's earlier ones, repeated) and SQLite 3.54.1's `sqlite3.c` (9.6 MB), on which `tenxel` matches clang on every byte.
 
-| Lexer | ns/byte |
-|---|---|
-| `tenxel` | 0.57 |
-| [stb_c_lexer](https://github.com/nothings/stb/blob/master/stb_c_lexer.h) | 1.43 |
-| The lexnet network, its compiled kernel with gcc `-O3 -march=native -ffast-math` | 79 |
-| tree-sitter-c, parse only | 114 |
-| tree-sitter-c, parse and highlight query | 229 |
-| Pygments `CLexer` | 965 |
+| Lexer | 715 KB of C, ns/byte | `sqlite3.c`, ns/byte |
+|---|---|---|
+| `tenxel` | 0.56 | 0.62 |
+| [simd-lexing](https://github.com/Mateuszd6/simd-lexing), AVX2, counting tokens only | 1.26 | 0.78 |
+| [stb_c_lexer](https://github.com/nothings/stb/blob/master/stb_c_lexer.h) | 1.43 | 1.57 |
+| [buster](https://github.com/buster14a/buster)'s C lexer, scalar path | 2.73 | 1.81 |
+| clang 19's lexer, `clang_tokenize` from libclang | 5.5 | 3.58 |
+| The lexnet network, its compiled kernel with gcc `-O3 -march=native -ffast-math` | 79 | |
+| tree-sitter-c, parse only | 114 | |
+| tree-sitter-c, parse and highlight query | 229 | |
+| Pygments `CLexer` | 965 | |
 
-stb_c_lexer converts numbers and copies strings, which `tenxel` doesn't need to do; tree-sitter builds a full syntax tree. The network gives the same output with and without `-ffast-math`, and takes 507 ns/byte without it. On one large block comment `tenxel` takes 0.04 ns/byte, and on its slowest pattern found, `a a a …`, 1.3 ns/byte. The portable fallback, used without AVX2, takes 10 ns/byte.
+The other lexers produce tokens and look up no keywords, so they do different work from `tenxel`. stb_c_lexer also converts numbers and copies strings, clang records each token's source location, and tree-sitter builds a full syntax tree. simd-lexing has no line splices outside literals and comments, prefixes or UTF-8 identifiers. buster's vectorized path needs AVX-512, which this CPU lacks, so it falls back to its scalar lexer here; on a Zen 4 laptop its authors report 2.0 cycles/byte on `sqlite3.c`, about what `tenxel` takes here (1.8). The network gives the same output with and without `-ffast-math`, and takes 507 ns/byte without it. On one large block comment `tenxel` takes 0.04 ns/byte, and on its slowest pattern found, `a a a …`, 1.3 ns/byte. The portable fallback, used without AVX2, takes 10 ns/byte.
 
 On the 229 headers in `/usr/include`, outside directives, stb_c_lexer's tokens agree with clang's on 99.993% of the bytes and `tenxel`'s on all of them. stb_c_lexer's misses there are mostly multi-line comments that start on a directive line. It also has no line splices, string prefixes or raw strings, and doesn't tell a directive from other code.
 
