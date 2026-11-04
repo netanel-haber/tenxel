@@ -60,7 +60,7 @@ Measured on an Intel i7-13800H with AVX2, capped at 2.9 GHz, on 715 KB of C (the
 | tree-sitter-c, parse and highlight query | 229 |
 | Pygments `CLexer` | 965 |
 
-stb_c_lexer converts numbers and copies strings, which `tenxel` doesn't need to do; tree-sitter builds a full syntax tree. The network gives the same output with and without `-ffast-math`, and takes 507 ns/byte without it. On one large block comment `tenxel` takes 0.04 ns/byte, and on its slowest pattern found, `a a a …`, 1.3 ns/byte. The portable fallback, used without AVX2 or NEON, takes 10 ns/byte.
+stb_c_lexer converts numbers and copies strings, which `tenxel` doesn't need to do; tree-sitter builds a full syntax tree. The network gives the same output with and without `-ffast-math`, and takes 507 ns/byte without it. On one large block comment `tenxel` takes 0.04 ns/byte, and on its slowest pattern found, `a a a …`, 1.3 ns/byte. The portable fallback, used without AVX2, takes 10 ns/byte.
 
 On the 229 headers in `/usr/include`, outside directives, stb_c_lexer's tokens agree with clang's on 99.993% of the bytes and `tenxel`'s on all of them. stb_c_lexer's misses there are mostly multi-line comments that start on a directive line. It also has no line splices, string prefixes or raw strings, and doesn't tell a directive from other code.
 
@@ -68,7 +68,6 @@ On the 229 headers in `/usr/include`, outside directives, stb_c_lexer's tokens a
 
 - `lex_token`, which defines the output, is checked against clang on generated inputs: real headers, mutated code, and token soup made of every case above. The keyword table is checked against clang too.
 - The SIMD paths are checked against `lex_token`: hundreds of MB of fuzzing with inputs flush against unmapped pages, and every string up to 5 bytes over the bytes that matter, placed across a block boundary.
-- **The NEON path has not been run.** It compiles for aarch64. Run `sh verify.sh` on ARM before relying on it.
 
 `sh verify.sh [fuzz_bytes] [oracle_megabytes]` runs everything. It needs clang 19 and python3, plus `uvx` for the layout check, which uses clang-format 21 with the style written in `verify.sh`.
 

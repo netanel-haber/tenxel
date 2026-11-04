@@ -14,7 +14,7 @@
  *
  * Build: cc -O3 -march=native -o tenxel tenxel.c
  * Usage: tenxel file.c, which prints the file colored. tenxel_classify() is the whole interface.
- * SIMD: AVX2, NEON or a portable fallback, chosen by the compiler's target. The NEON path has not been run.
+ * SIMD: AVX2, or a portable fallback without it, chosen by the compiler's target.
  */
 #include <stdbool.h>
 #include <stdint.h>
@@ -570,85 +570,6 @@ static inline void store_classes(u8 *o, Block def, u64 d0, u64 d1, u64 d2, u64 d
     _mm256_storeu_si256((__m256i *)(o + 32),
                         half_classes(def.b, (uint32_t)(d0 >> 32), (uint32_t)(d1 >> 32), (uint32_t)(d2 >> 32),
                                      (uint32_t)(d3 >> 32), (uint32_t)(clear >> 32)));
-}
-
-#elif defined(__ARM_NEON) && defined(__aarch64__)
-#include <arm_neon.h>
-typedef struct {
-    uint8x16_t v[4];
-} Block;
-
-static inline Block vec_load(const u8 *p) {
-    Block b = {{vld1q_u8(p), vld1q_u8(p + 16), vld1q_u8(p + 32), vld1q_u8(p + 48)}};
-    return b;
-}
-
-/* Four 0x00/0xFF vectors to one bit per byte */
-static inline u64 movemask4(const uint8x16_t *x) {
-    uint8x16_t t0 = vsriq_n_u8(x[1], x[0], 1);
-    uint8x16_t t1 = vsriq_n_u8(x[3], x[2], 1);
-    uint8x16_t t2 = vsriq_n_u8(t1, t0, 2);
-    uint8x16_t t3 = vsriq_n_u8(t2, t2, 4);
-    return vget_lane_u64(vreinterpret_u64_u8(vshrn_n_u16(vreinterpretq_u16_u8(t3), 4)), 0);
-}
-
-static inline uint8x16_t eq16(uint8x16_t v, u8 c) { return vceqq_u8(v, vdupq_n_u8(c)); }
-
-static inline u64 vec_eq(Block x, u8 c) {
-    uint8x16_t e[4] = {eq16(x.v[0], c), eq16(x.v[1], c), eq16(x.v[2], c), eq16(x.v[3], c)};
-    return movemask4(e);
-}
-
-/* lo <= v <= hi */
-static inline uint8x16_t in_range16(uint8x16_t v, u8 lo, u8 hi) {
-    return vcltq_u8(vsubq_u8(v, vdupq_n_u8(lo)), vdupq_n_u8((u8)(hi - lo + 1)));
-}
-
-static inline void block_masks(const u8 *p, Masks *m, Block *def) {
-    uint8x16_t k[6][4];
-    for (int i = 0; i < 4; i++) {
-        uint8x16_t v = vld1q_u8(p + 16 * i);
-        uint8x16_t next = vld1q_u8(p + 16 * i + 1);
-        uint8x16_t digit = in_range16(v, '0', '9');
-        uint8x16_t word = vorrq_u8(vorrq_u8(digit, eq16(v, '_')), in_range16(vorrq_u8(v, vdupq_n_u8(32)), 'a', 'z'));
-        uint8x16_t space = vorrq_u8(in_range16(v, 9, 13), eq16(v, ' '));
-        uint8x16_t special = vorrq_u8(vorrq_u8(eq16(v, '"'), eq16(v, '\'')), vorrq_u8(eq16(v, '#'), eq16(v, '\\')));
-        special = vorrq_u8(special, vorrq_u8(vorrq_u8(eq16(v, 0), eq16(v, '$')), vcgeq_u8(v, vdupq_n_u8(0x80))));
-        uint8x16_t opens = vandq_u8(eq16(v, '/'), vorrq_u8(eq16(next, '/'), eq16(next, '*')));
-        special = vorrq_u8(special, vorrq_u8(opens, vandq_u8(eq16(v, '%'), eq16(next, ':'))));
-
-        k[0][i] = word;
-        k[1][i] = digit;
-        k[2][i] = eq16(v, '.');
-        k[3][i] = space;
-        k[4][i] = vorrq_u8(eq16(v, '\n'), eq16(v, '\r'));
-        k[5][i] = special;
-        def->v[i] = vbicq_u8(vbslq_u8(word, vdupq_n_u8(C_IDENT), vdupq_n_u8(C_PUNCT)), space);
-    }
-    m->ident = movemask4(k[0]);
-    m->digit = movemask4(k[1]);
-    m->dot = movemask4(k[2]);
-    m->space = movemask4(k[3]);
-    m->newline = movemask4(k[4]);
-    m->special = movemask4(k[5]);
-}
-
-/* 0xFF in each byte whose bit in m is set */
-static inline uint8x16_t bit_bytes(uint16_t m) {
-    static const u8 tbl[16] = {1, 2, 4, 8, 16, 32, 64, 128, 1, 2, 4, 8, 16, 32, 64, 128};
-    return vtstq_u8(vcombine_u8(vdup_n_u8((u8)m), vdup_n_u8((u8)(m >> 8))), vld1q_u8(tbl));
-}
-
-/* The default classes, with the bytes in clear set to 0 first, XORed with four bit planes */
-static inline void store_classes(u8 *o, Block def, u64 d0, u64 d1, u64 d2, u64 d3, u64 clear) {
-    for (int i = 0; i < 4; i++) {
-        int k = 16 * i;
-        uint8x16_t x = vandq_u8(bit_bytes((uint16_t)(d0 >> k)), vdupq_n_u8(1));
-        x = vorrq_u8(x, vandq_u8(bit_bytes((uint16_t)(d1 >> k)), vdupq_n_u8(2)));
-        x = vorrq_u8(x, vandq_u8(bit_bytes((uint16_t)(d2 >> k)), vdupq_n_u8(4)));
-        x = vorrq_u8(x, vandq_u8(bit_bytes((uint16_t)(d3 >> k)), vdupq_n_u8(8)));
-        vst1q_u8(o + k, veorq_u8(vbicq_u8(def.v[i], bit_bytes((uint16_t)(clear >> k))), x));
-    }
 }
 
 #else
