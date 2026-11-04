@@ -1,3 +1,2 @@
 fuzz_fail.bin
-__pycache__/
-*.o
+oracle_fail.c

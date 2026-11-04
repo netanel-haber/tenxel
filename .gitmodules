@@ -1,3 +1,0 @@
-[submodule "lexnet_hf"]
-	path = lexnet_hf
-	url = https://huggingface.co/alpindale/lexnet.git
