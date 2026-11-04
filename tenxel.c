@@ -214,11 +214,10 @@ static inline int keyword_class(const u8 *w, size_t len) {
     u64 a = load64(w) & MASK[8 + head];
     u64 b = load64(w + 8) & MASK[head];
     const Keyword *k = &KEYWORDS[keyword_slot(a, b)];
-    if (load64(k->word) != a || load64(k->word + 8) != b)
-        return C_IDENT;
-    if (len >= 16 && (memcmp(k->word + 16, w + 16, len - 16) || k->word[len]))
-        return C_IDENT; /* a shorter word compares equal on its zero padding; a 16-byte one doesn't */
-    return k->cls;
+    u64 same = ((load64(k->word) ^ a) | (load64(k->word + 8) ^ b)) == 0; /* arithmetic, not a branch */
+    if (same & ((u64)(15 - (long long)len) >> 63)) /* len >= 16 and a match: rare, and one branch */
+        same = !memcmp(k->word + 16, w + 16, len - 16) && !k->word[len]; /* a 16-byte word has no zero padding */
+    return (int)(C_IDENT ^ ((k->cls ^ C_IDENT) & -same));
 }
 
 /* ---- Unicode: which code points can start an identifier, and which are whitespace ----
@@ -578,24 +577,18 @@ static inline __m256i bit_bytes(uint32_t m) {
     return _mm256_cmpeq_epi8(x, bits);
 }
 
-static inline __m256i half_classes(__m256i def, uint32_t d0, uint32_t d1, uint32_t d2, uint32_t d3, uint32_t clear) {
+static inline __m256i half_classes(__m256i def, uint32_t d0, uint32_t d1, uint32_t d2) {
     __m256i x = _mm256_or_si256(_mm256_and_si256(bit_bytes(d0), _mm256_set1_epi8(1)),
                                 _mm256_and_si256(bit_bytes(d1), _mm256_set1_epi8(2)));
     x = _mm256_or_si256(x, _mm256_and_si256(bit_bytes(d2), _mm256_set1_epi8(4)));
-    if (clear) {
-        x = _mm256_or_si256(x, _mm256_and_si256(bit_bytes(d3), _mm256_set1_epi8(8)));
-        def = _mm256_andnot_si256(bit_bytes(clear), def);
-    }
     return _mm256_xor_si256(def, x);
 }
 
-/* The default classes, with the bytes in clear set to 0 first, XORed with four bit planes */
-static inline void store_classes(u8 *o, Block def, u64 d0, u64 d1, u64 d2, u64 d3, u64 clear) {
-    _mm256_storeu_si256((__m256i *)o,
-                        half_classes(def.a, (uint32_t)d0, (uint32_t)d1, (uint32_t)d2, (uint32_t)d3, (uint32_t)clear));
+/* The default classes XORed with three bit planes */
+static inline void store_classes(u8 *o, Block def, u64 d0, u64 d1, u64 d2) {
+    _mm256_storeu_si256((__m256i *)o, half_classes(def.a, (uint32_t)d0, (uint32_t)d1, (uint32_t)d2));
     _mm256_storeu_si256((__m256i *)(o + 32),
-                        half_classes(def.b, (uint32_t)(d0 >> 32), (uint32_t)(d1 >> 32), (uint32_t)(d2 >> 32),
-                                     (uint32_t)(d3 >> 32), (uint32_t)(clear >> 32)));
+                        half_classes(def.b, (uint32_t)(d0 >> 32), (uint32_t)(d1 >> 32), (uint32_t)(d2 >> 32)));
 }
 
 #else
@@ -637,18 +630,16 @@ static inline void block_masks(const u8 *p, Masks *m, Block *def) {
     *def = p;
 }
 
-/* The default classes, with the bytes in clear set to 0 first, XORed with four bit planes */
-static inline void store_classes(u8 *o, Block def, u64 d0, u64 d1, u64 d2, u64 d3, u64 clear) {
+/* The default classes XORed with three bit planes */
+static inline void store_classes(u8 *o, Block def, u64 d0, u64 d1, u64 d2) {
     for (int i = 0; i < 64; i++) {
         int c = def[i];
         int base = C_PUNCT;
-        if (clear >> i & 1)
-            base = 0;
-        else if (is_ident_ascii(c))
+        if (is_ident_ascii(c))
             base = C_IDENT;
         else if (is_hspace(c) || is_newline(c))
             base = C_SPACE;
-        o[i] = (u8)(base ^ ((d0 >> i & 1) | (d1 >> i & 1) << 1 | (d2 >> i & 1) << 2 | (d3 >> i & 1) << 3));
+        o[i] = (u8)(base ^ ((d0 >> i & 1) | (d1 >> i & 1) << 1 | (d2 >> i & 1) << 2));
     }
 }
 #endif
@@ -1164,62 +1155,6 @@ static inline u64 reverse_bits(u64 x) {
     return (x >> 1 & 0x5555555555555555ULL) | (x & 0x5555555555555555ULL) << 1;
 }
 
-/* The bytes right after a backslash run of odd length: the escaped ones, by simdjson's trick. A run that reaches byte
- * 63 escapes a byte of the next block, where no literal of this block reaches. */
-static inline u64 escaped_by(u64 backslash) {
-    const u64 odd = 0xAAAAAAAAAAAAAAAAULL;
-    u64 starts = backslash & ~(backslash << 1);
-    u64 from_even = (backslash + (starts & ~odd)) & ~backslash;
-    u64 from_odd = (backslash + (starts & odd)) & ~backslash;
-    return (from_even & odd) | (from_odd & ~odd);
-}
-
-/* Classes the literals and comments that start at the special bytes in todo and end in this block, into the three
- * masks, and returns the specials left. It stops at the first literal or comment that doesn't end here, a literal
- * after a word character (a prefix, or a digit separator), one that might hold a splice, and any other special byte.
- * It is kept out of line: inlined, the compiler computes its masks for every block. */
-__attribute__((noinline)) static u64 block_literals(const u8 *b, const Masks *m, u64 todo, u64 *strings, u64 *chars,
-                                                    u64 *comments) {
-    Block v = vec_load(b);
-    Block w = vec_load(b + 1);
-    u64 backslash = vec_eq(v, '\\');
-    u64 escaped = escaped_by(backslash);
-    u64 dquotes = vec_eq(v, '"') & ~escaped;
-    u64 squotes = vec_eq(v, '\'') & ~escaped;
-    u64 closes = vec_eq(v, '*') & vec_eq(w, '/'); /* each star with a slash after it */
-    u64 splices = backslash & m->space >> 1;      /* each backslash before a space or newline */
-    while (todo) {
-        unsigned q = (unsigned)__builtin_ctzll(todo);
-        u64 word = (m->ident | m->dot) & ~(*strings | *chars | *comments);
-        u64 *into = comments;
-        u64 risky = splices;
-        u64 ends;
-        if (b[q] == '/' && b[q + 1] == '/') {
-            ends = m->newline & ~1ULL << q;
-        } else if (b[q] == '/' && b[q + 1] == '*' && q < 62) {
-            ends = (closes & ~1ULL << (q + 1)) << 1; /* the slash after a star past the opening one */
-            risky = backslash;
-        } else if ((b[q] == '"' || b[q] == '\'') && !(q && (word >> (q - 1) & 1))) {
-            into = b[q] == '"' ? strings : chars;
-            ends = ((b[q] == '"' ? dquotes : squotes) | m->newline) & ~1ULL << q;
-        } else {
-            break;
-        }
-        if (!ends)
-            break;
-
-        unsigned last = (unsigned)__builtin_ctzll(ends);
-        if (is_newline(b[last])) /* the newline that cuts it off is not part of it */
-            last--;
-        u64 span = (2ULL << last) - (1ULL << q);
-        if (risky & span)
-            break;
-        *into |= span;
-        todo &= ~((2ULL << last) - 1);
-    }
-    return todo;
-}
-
 /* One block of code at b: the input, or a padded copy of its last bytes, where real is the same place in the input.
  * Classifies everything before the first byte it can't handle alone and returns how many bytes that is. *special is
  * set when that byte needs lex_token, rather than being the start of a word that might run on. */
@@ -1228,37 +1163,25 @@ static inline unsigned code_block(Lexer *L, const u8 *b, const u8 *real, u8 *o, 
     Block def;
     block_masks(b, &m, &def);
 
-    /* Literals and comments that end in this block get their class here */
-    u64 strings = 0;
-    u64 chars = 0;
-    u64 comments = 0;
-    u64 todo = m.special;
-    if (todo) {
-        unsigned q = (unsigned)__builtin_ctzll(todo);
-        if (b[q] == '"' || b[q] == '\'' || (b[q] == '/' && b[q + 1] == '/'))
-            todo = block_literals(b, &m, todo, &strings, &chars, &comments);
-    }
-    u64 regions = strings | chars | comments;
-
     /* Numbers: a run of word characters and dots that starts with a digit or a dot and a digit. Adding each start
      * bit carries through its run and clears it. */
-    u64 run = (m.ident | m.dot) & ~regions;
+    u64 run = m.ident | m.dot;
     u64 starts = run & ~(run << 1) & (m.digit | (m.dot & m.digit >> 1));
     u64 number = run & ~(run + starts);
 
-    /* Stops: what the literal loop left, a dot and digit inside a word or after dots (x.5, ..5, ...5), and a number
-     * ending in an exponent sign (1e+5) */
-    u64 stops = todo | (m.dot & m.digit >> 1 & ~number & ~regions);
+    /* Stops: the special bytes, a dot and digit inside a word or after dots (x.5, ..5, ...5), and a number ending in
+     * an exponent sign (1e+5) */
+    u64 stops = m.special | (m.dot & m.digit >> 1 & ~number);
     for (u64 e = number & ~(number >> 1) & ~m.digit & ~(1ULL << 63); e; e &= e - 1) {
         unsigned i = (unsigned)__builtin_ctzll(e);
         if (((b[i] | 32) == 'e' || (b[i] | 32) == 'p') && (b[i + 1] == '+' || b[i + 1] == '-'))
             stops |= 1ULL << i;
     }
 
-    /* The last word or number waits for the next block when only spaces and comments follow it here: it might go on,
-     * or be a function */
-    u64 closed = ~(run | m.space | comments);
-    u64 suffix = ~0ULL; /* the bytes after the last one that isn't a word character, dot, space or comment */
+    /* The last word or number waits for the next block when only spaces follow it here: it might go on, or be a
+     * function */
+    u64 closed = ~(run | m.space);
+    u64 suffix = ~0ULL; /* the bytes after the last one that isn't a word character, dot or space */
     if (closed >> 63)
         suffix = 0;
     else if (closed)
@@ -1275,7 +1198,7 @@ static inline unsigned code_block(Lexer *L, const u8 *b, const u8 *real, u8 *o, 
     if (limit && limit < 64 && (run >> (limit - 1) & 1)) { /* the word or number before the stop waits too */
         u64 before = ~run & ((1ULL << limit) - 1);
         limit = before ? 64 - (unsigned)__builtin_clzll(before) : 0;
-    } else if (limit && b[limit] == '\\' && !((m.space | regions) >> (limit - 1) & 1)) {
+    } else if (limit && b[limit] == '\\' && !(m.space >> (limit - 1) & 1)) {
         limit--; /* a splice can join the byte before it to the one after: "/\<newline>*" */
     }
     if (!limit)
@@ -1283,27 +1206,35 @@ static inline unsigned code_block(Lexer *L, const u8 *b, const u8 *real, u8 *o, 
 
     u64 region = limit == 64 ? ~0ULL : (1ULL << limit) - 1;
     number &= region;
-    regions &= region;
-    comments &= region;
-    u64 word = m.ident & ~number & ~regions & region;
+    u64 word = m.ident & ~number & region;
     u64 word_starts = word & ~(word << 1);
     u64 word_ends = word & ~(word >> 1);
-    u64 skip = m.space | comments;
-    u64 d0 = (number & m.ident) | (chars & region); /* the default class is C_IDENT, and C_CONSTANT is C_IDENT ^ 1 */
-    u64 d1 = regions & ~comments;                   /* C_STRING and C_CHAR, on a cleared default */
-    u64 d2 = regions & ~comments;
+    u64 skip = m.space;
+    u64 d0 = number & m.ident; /* the default class is C_IDENT, and C_CONSTANT is C_IDENT ^ 1 */
+    u64 d1 = 0;
+    u64 d2 = 0;
 
-    /* Functions: from each "(", back through spaces and comments, to the word there. With the bits reversed, that is
-     * a carry from each "(" through the spaces and comments before it, and then through the word it lands on. */
+    /* Functions: from each "(", back through spaces, to the word there. With the bits reversed, that is a carry from
+     * each "(" through the spaces before it, and then through the word it lands on. */
+#if defined(__AVX2__) && defined(__GFNI__)
+    __m256i three = _mm256_set_epi64x(0, (long long)m.paren, (long long)word, (long long)skip);
+    three = _mm256_gf2p8affine_epi64_epi8(three, _mm256_set1_epi64x((long long)0x8040201008040201ULL), 0);
+    three = _mm256_shuffle_epi8(three, _mm256_setr_epi8(7, 6, 5, 4, 3, 2, 1, 0, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5,
+                                                        4, 3, 2, 1, 0, 15, 14, 13, 12, 11, 10, 9, 8));
+    u64 rskip = (u64)_mm256_extract_epi64(three, 0);
+    u64 rword = (u64)_mm256_extract_epi64(three, 1);
+    u64 rland = (rskip + ((u64)_mm256_extract_epi64(three, 2) << 1)) & ~rskip;
+#else
     u64 rskip = reverse_bits(skip);
     u64 rword = reverse_bits(word);
-    u64 rland = (rskip + (reverse_bits(m.paren & ~regions) << 1)) & ~rskip;
+    u64 rland = (rskip + (reverse_bits(m.paren) << 1)) & ~rskip;
+#endif
     u64 functions = reverse_bits(rword & ~(rword + (rland & rword)));
 
-    /* A word followed by a byte where a comment the block didn't take, a splice or a NUL may hide needs lex_token's
-     * look: a special byte, or the byte before one (a slash before a splice) */
-    u64 next = (skip + (word_ends << 1)) & ~skip; /* after each word, the first byte that isn't a space or comment */
-    u64 unsure = (m.special & ~regions) | m.special >> 1 | (u64)(b[64] == '\\') << 63;
+    /* A word followed by a byte where a comment, a splice or a NUL may hide needs lex_token's look: a special byte, or
+     * the byte before one (a slash before a splice) */
+    u64 next = (skip + (word_ends << 1)) & ~skip; /* after each word, the first byte that isn't a space */
+    u64 unsure = m.special | m.special >> 1 | (u64)(b[64] == '\\') << 63;
     for (u64 u = next & unsure & ~m.paren; u; u &= u - 1) {
         unsigned a = (unsigned)__builtin_ctzll(u);
         unsigned e = 63 - (unsigned)__builtin_clzll(word_ends & ((1ULL << a) - 1));
@@ -1323,12 +1254,9 @@ static inline unsigned code_block(Lexer *L, const u8 *b, const u8 *real, u8 *o, 
         unsigned e = (unsigned)__builtin_ctzll(kw_ends);
         kw_starts &= kw_starts - 1;
         kw_ends &= kw_ends - 1;
-        int c = keyword_class(b + s, e - s + 1);
-        if (c == C_IDENT)
-            continue;
-        unsigned x = (unsigned)c ^ C_IDENT;
+        u64 x = (u64)keyword_class(b + s, e - s + 1) ^ C_IDENT; /* 0 for an identifier: no branch on it */
         u64 bits = (2ULL << e) - (1ULL << s);
-        functions &= ~bits;
+        functions &= ~(bits & -(u64)(x != 0));
         d0 |= bits & -(u64)(x & 1);
         d1 |= bits & -(u64)(x >> 1 & 1);
         d2 |= bits & -(u64)(x >> 2 & 1);
@@ -1336,12 +1264,12 @@ static inline unsigned code_block(Lexer *L, const u8 *b, const u8 *real, u8 *o, 
     d0 |= functions; /* C_FUNCTION is C_IDENT ^ 7 */
     d1 |= functions;
     d2 |= functions;
-    store_classes(o, def, d0, d1, d2, comments, regions);
+    store_classes(o, def, d0, d1, d2);
     for (u64 dots = number & m.dot; dots; dots &= dots - 1) /* a dot's default class is C_PUNCT, not C_IDENT */
         o[__builtin_ctzll(dots)] = C_CONSTANT;
 
-    u64 solid = region & ~m.space & ~comments; /* the bytes of tokens: after the last one, is there a newline? */
-    u64 newlines = region & m.newline & ~comments;
+    u64 solid = region & ~m.space; /* the bytes of tokens: after the last one, is there a newline? */
+    u64 newlines = region & m.newline;
     if (solid)
         L->line_start = (newlines >> (63 - __builtin_clzll(solid))) > 1;
     else if (newlines)

@@ -1,6 +1,6 @@
 # tenxel
 
-A C lexer for syntax highlighting, in one C file. It gives every byte one of 11 classes, with clang's token boundaries, in about 3 CPU cycles per byte with AVX2.
+A C lexer for syntax highlighting, in one C file. It gives every byte one of 11 classes, with clang's token boundaries, in about 2.5 to 4.5 CPU cycles per byte with AVX2.
 
 It started as a sort of port of [lexnet](https://huggingface.co/alpindale/lexnet), alpindale's hand-built neural network that highlights C, and takes its idea, classes and name (backwards) from it. The port is at the tag `lexnet-exact`.
 
@@ -21,10 +21,10 @@ Tokens match clang 19's raw lexer with `-std=gnu23`, including line splices, dig
 
 | Lexer | Time |
 |---|---|
-| tenxel | 2.7 cycles/byte |
-| [simd-lexing](https://github.com/Mateuszd6/simd-lexing), counting tokens only | 1.4× |
-| [stb_c_lexer](https://github.com/nothings/stb/blob/master/stb_c_lexer.h) | 2.9× |
-| clang 19, `clang_tokenize` | 6.7× |
+| tenxel | 2.5 cycles/byte |
+| [simd-lexing](https://github.com/Mateuszd6/simd-lexing), counting tokens only | 1.5× |
+| [stb_c_lexer](https://github.com/nothings/stb/blob/master/stb_c_lexer.h) | 3.1× |
+| clang 19, `clang_tokenize` | 7.1× |
 
 The others produce tokens rather than a class per byte. [buster](https://github.com/buster14a/buster)'s lexer needs AVX-512, which this CPU lacks; its authors report 2.0 cycles/byte on `sqlite3.c`.
 
