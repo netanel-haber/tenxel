@@ -9,7 +9,7 @@ STYLE='{BasedOnStyle: LLVM, IndentWidth: 4, ColumnLimit: 120, AllowShortIfStatem
 AllowShortLoopsOnASingleLine: false, AllowShortBlocksOnASingleLine: Never, SortIncludes: Never, ReflowComments: Never}'
 
 if command -v uvx > /dev/null; then
-    uvx --quiet --from clang-format==21.1.8 clang-format --style="$STYLE" --dry-run --Werror tenxel.c fuzz.c exhaust.c
+    uvx --quiet --from clang-format==21.1.8 clang-format --style="$STYLE" --dry-run --Werror tenxel.c fuzz.c exhaust.c bench.c
     echo "ok: layout"
 fi
 for path in native portable; do
@@ -19,6 +19,7 @@ for path in native portable; do
 done
 $CC $FLAGS -march=native -o "$OUT/tenxel" tenxel.c
 $CC $FLAGS -march=native -o "$OUT/exhaust" exhaust.c
+$CC $FLAGS -march=native -o "$OUT/bench" bench.c
 cat tenxel.c /usr/include/*.h > "$OUT/corpus.c" 2> /dev/null || cp tenxel.c "$OUT/corpus.c"
 
 "$OUT/tenxel" tenxel.c | sed 's/\x1b\[[0-9;]*m//g' | cmp - tenxel.c

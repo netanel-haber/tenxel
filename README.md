@@ -1,6 +1,6 @@
 # tenxel
 
-A C lexer for syntax highlighting, in one C file. It gives every byte one of 11 classes, with clang's token boundaries, at about 0.6 ns per byte on AVX2.
+A C lexer for syntax highlighting, in one C file. It gives every byte one of 11 classes, with clang's token boundaries, in about 3 CPU cycles per byte with AVX2.
 
 ## Credit
 
@@ -43,42 +43,48 @@ The one known difference is named universal character names (`\N{LATIN SMALL LET
 
 ## Performance
 
-Measured on an Intel i7-13800H (AVX2, capped at 2.9 GHz), on one core, best of up to 40 runs. The inputs are 715 KB of C (lexnet's C files and earlier code from this repo, repeated) and SQLite 3.54.1's `sqlite3.c` (9.6 MB). On `sqlite3.c`, tenxel matches clang on every byte.
+`bench.c` measures it on any file, in ns, CPU cycles and instructions per byte. Cycles and instructions come from the CPU's counters, so they don't depend on the clock speed:
 
-| Lexer | 715 KB of C, ns/byte | `sqlite3.c`, ns/byte |
+```sh
+cc -O3 -march=native -o bench bench.c
+taskset -c 2 ./bench file.c
+```
+
+On an Intel i7-13800H (Raptor Lake, AVX2), on one core, the fastest of 40 runs:
+
+| Input | Cycles/byte | Instructions/byte | ns/byte at 4.95 GHz |
+|---|---|---|---|
+| 715 KB of C (lexnet's C files and earlier code from this repo, repeated) | 2.9 | 11.1 | 0.57 |
+| SQLite 3.54.1's `sqlite3.c`, 9.6 MB | 3.2 | 7.6 | 0.64 |
+
+On `sqlite3.c`, tenxel matches clang on every byte. On one large block comment it takes 0.3 cycles/byte, and on its slowest pattern found, `a a a …`, 6. Without AVX2 it uses portable code, which takes 43 cycles/byte on the 715 KB of C.
+
+Other lexers on the same machine, as multiples of tenxel's time:
+
+| Lexer | 715 KB of C | `sqlite3.c` |
 |---|---|---|
-| tenxel | 0.56 | 0.62 |
-| [simd-lexing](https://github.com/Mateuszd6/simd-lexing), counting tokens only | 1.26 | 0.78 |
-| [stb_c_lexer](https://github.com/nothings/stb/blob/master/stb_c_lexer.h) | 1.43 | 1.57 |
-| [buster](https://github.com/buster14a/buster)'s C lexer, scalar path | 2.73 | 1.81 |
-| clang 19's lexer, `clang_tokenize` from libclang | 5.5 | 3.58 |
-| lexnet, its compiled kernel with gcc `-O3 -march=native -ffast-math` | 79 | |
-| tree-sitter-c, parse only | 114 | |
-| tree-sitter-c, parse and highlight query | 229 | |
-| Pygments `CLexer` | 965 | |
+| [simd-lexing](https://github.com/Mateuszd6/simd-lexing), counting tokens only | 2.2× | 1.3× |
+| [stb_c_lexer](https://github.com/nothings/stb/blob/master/stb_c_lexer.h) | 2.6× | 2.5× |
+| [buster](https://github.com/buster14a/buster)'s C lexer, scalar path | 4.9× | 2.9× |
+| clang 19's lexer, `clang_tokenize` from libclang | 9.8× | 5.8× |
+| lexnet, its compiled kernel with gcc `-O3 -march=native -ffast-math` | 140× | |
+| tree-sitter-c, parse only | 200× | |
+| tree-sitter-c, parse and highlight query | 410× | |
+| Pygments `CLexer` | 1,700× | |
 
 The others do different work:
 
 - stb_c_lexer, simd-lexing, buster and clang produce tokens, not a class per byte. stb_c_lexer also converts numbers and copies strings, and clang records each token's location.
 - simd-lexing has no line splices outside literals and comments, no string prefixes and no UTF-8 identifiers.
-- buster's fast path needs AVX-512, which this CPU lacks. On a Zen 4 laptop its authors report 2.0 cycles/byte on `sqlite3.c`; tenxel takes 1.8 here.
+- buster's fast path needs AVX-512, which this CPU lacks. On a Zen 4 laptop with it, its authors report 2.0 cycles/byte on `sqlite3.c`, fewer than tenxel's 3.2 here.
 - tree-sitter builds a full syntax tree.
-- lexnet gives the same output without `-ffast-math`, at 507 ns/byte.
+- lexnet gives the same output without `-ffast-math`, 6.4 times slower.
 
 On the 229 headers in `/usr/include`, outside directives, stb_c_lexer agrees with clang on 99.993% of the bytes and tenxel on all of them. Most of stb_c_lexer's misses are multi-line comments that start on a directive line. It also has no line splices, string prefixes or raw strings, and doesn't recognize directives.
 
-tenxel's other speeds: 0.04 ns/byte on one large block comment, 1.3 on its slowest pattern found (`a a a …`), and 10 with the portable code used without AVX2.
-
 ## Checks
 
-| File | What it checks |
-|---|---|
-| `oracle.py` | `tenxel_classify` against clang, on real headers, mutated code and generated token soup; also the keyword table |
-| `fuzz.c` | The SIMD path against `lex_token`, the one-token-at-a-time lexer in `tenxel.c`, on hundreds of MB of generated input placed against unmapped pages |
-| `exhaust.c` | The same, on every string up to 5 bytes over the bytes that matter, placed across a 64-byte block boundary |
-| `verify.sh` | Runs all three, and checks the layout |
-
-`sh verify.sh [fuzz_bytes] [oracle_megabytes]` needs clang 19, python3, and `uvx` for the layout check, which uses clang-format 21 with the style in `verify.sh`.
+`sh verify.sh [fuzz_bytes] [oracle_megabytes]` checks tenxel against clang with `oracle.py`, and its SIMD path against `lex_token`, its one-token-at-a-time lexer, with `fuzz.c` and `exhaust.c`. It needs clang 19, python3, and `uvx` for the layout check, which uses clang-format 21 with the style in `verify.sh`.
 
 ## License
 
