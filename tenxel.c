@@ -1,5 +1,8 @@
 /* tenxel.c - a C lexer for syntax highlighting: one class per byte, the same as clang.
  *
+ * It started as a sort of port of lexnet by alpindale (https://huggingface.co/alpindale/lexnet), a hand-built neural
+ * network that highlights C, and keeps its idea and its 11 classes.
+ *
  * Token boundaries match clang 19's raw lexer (-std=gnu23, x86-64 Linux): line splices anywhere, digraphs, string
  * prefixes, raw strings, C23 numbers, UCNs and UTF-8 identifiers. On top of clang's tokens it marks clang's keywords
  * and builtin types, directives (a # or %: that is the first token on its line, up to the next newline outside a

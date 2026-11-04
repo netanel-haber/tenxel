@@ -2,14 +2,16 @@
 
 A C lexer for syntax highlighting in one C file. It gives every byte one of 11 classes, with the same token boundaries as clang, at about 0.6 ns per byte on AVX2.
 
-It started as [lexnet](https://huggingface.co/alpindale/lexnet), a hand-built neural network that highlights C, rewritten as plain C. That version matched the network byte for byte, including its mistakes, and is kept at the tag `lexnet-exact`.
-
 | File | What it is |
 |---|---|
 | `tenxel.c` | The lexer and its command line |
 | `oracle.py` | The reference: the class of every byte according to clang's lexer, and a checker for `tenxel` |
 | `fuzz.c`, `exhaust.c` | Check the SIMD paths against `lex_token`, the one-token-at-a-time lexer inside `tenxel.c` |
 | `verify.sh` | Runs all the checks |
+
+## Credit
+
+tenxel is a descendant of [lexnet](https://huggingface.co/alpindale/lexnet) by alpindale, a hand-built neural network that highlights C. It started as a sort of port of it: the first version rewrote the network as plain C, matching it byte for byte, mistakes included, and is kept at the tag `lexnet-exact`. tenxel has since moved to clang's rules and a different design, but the idea of classifying every byte, the 11 classes and the name (lexnet backwards) all come from lexnet. Thanks to alpindale for it.
 
 ## Use
 
