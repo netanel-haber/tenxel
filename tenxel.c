@@ -24,6 +24,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if defined(__AVX2__) || defined(__BMI__) || defined(__LZCNT__)
+#include <immintrin.h>
+#endif
 
 typedef uint8_t u8;
 typedef uint64_t u64;
@@ -469,12 +472,13 @@ static int peek(const u8 *p, const u8 *end, size_t *n) {
 /* ---- SIMD ----
  * vec_eq(block, c): the 64-bit mask of bytes equal to c.
  * block_masks(): what a block of code needs, as masks, and the default class of each byte. It reads 65 bytes, since
- * whether the last byte opens a comment or is a %: depends on the next.
+ * whether the last byte can start a keyword depends on the next.
  * store_classes(): the default classes, XORed with bit planes. */
 typedef struct {
     u64 ident, digit, dot, space, newline, paren;
     u64 keyword_first; /* bytes whose next one could follow it at the start of a keyword (no false negatives) */
-    u64 special; /* what blocks leave to lex_token: " ' # \ $ NUL, bytes from 0x80, and the starts of // /" "* %: */
+    u64 special; /* what blocks leave to lex_token: " ' # \ $ % / NUL and bytes from 0x80. A / or % in code is rare
+                  * enough that it costs less to stop at each than to see whether it starts a comment or %: */
 } Masks;
 
 #if defined(__AVX2__)
@@ -504,8 +508,8 @@ static inline void half_masks(__m256i v, __m256i next, u64 *m, __m256i *def) {
         _mm256_setr_epi8(' ', -128, -128, -128, -128, -128, -128, -128, -128, '\t', '\n', '\v', '\f', '\r', -128, -128,
                          ' ', -128, -128, -128, -128, -128, -128, -128, -128, '\t', '\n', '\v', '\f', '\r', -128, -128);
     const __m256i specials =
-        _mm256_setr_epi8(0, -128, '"', '#', '$', -128, -128, '\'', -128, -128, -128, -128, '\\', -128, -128, -128, 0,
-                         -128, '"', '#', '$', -128, -128, '\'', -128, -128, -128, -128, '\\', -128, -128, -128);
+        _mm256_setr_epi8(0, -128, '"', '#', '$', '%', -128, '\'', -128, -128, -128, -128, '\\', -128, -128, '/', 0,
+                         -128, '"', '#', '$', '%', -128, '\'', -128, -128, -128, -128, '\\', -128, -128, '/');
     /* Word characters by nibbles: bit 1 is a digit (row 3), 2 the letters in rows 4 and 6, 4 those in rows 5 and 7,
      * and 8 the _ */
     const __m256i by_low = _mm256_setr_epi8(5, 7, 7, 7, 7, 7, 7, 7, 7, 7, 6, 2, 2, 2, 2, 10, 5, 7, 7, 7, 7, 7, 7, 7, 7,
@@ -536,8 +540,6 @@ static inline void half_masks(__m256i v, __m256i next, u64 *m, __m256i *def) {
     __m256i space = lookup_eq(v, spaces);
 
     __m256i special = _mm256_or_si256(lookup_eq(v, specials), v); /* v: its sign bit marks bytes from 0x80 */
-    __m256i opens = _mm256_and_si256(eq(v, '/'), _mm256_or_si256(eq(next, '/'), eq(next, '*')));
-    special = _mm256_or_si256(special, _mm256_or_si256(opens, _mm256_and_si256(eq(v, '%'), eq(next, ':'))));
 
     m[0] = ~mask32(not_word) & 0xFFFFFFFF;
     m[1] = mask32(_mm256_cmpeq_epi8(kind, _mm256_set1_epi8(1)));
@@ -607,7 +609,6 @@ static inline void block_masks(const u8 *p, Masks *m, Block *def) {
     memset(m, 0, sizeof *m);
     for (int i = 0; i < 64; i++) {
         int c = p[i];
-        int next = p[i + 1];
         u64 bit = 1ULL << i;
         if (is_ident_ascii(c))
             m->ident |= bit;
@@ -621,9 +622,7 @@ static inline void block_masks(const u8 *p, Masks *m, Block *def) {
             m->space |= bit;
         if (is_newline(c))
             m->newline |= bit;
-        if (c == '"' || c == '\'' || c == '#' || c == '\\' || c == 0 || c == '$' || c >= 0x80)
-            m->special |= bit;
-        if ((c == '/' && (next == '/' || next == '*')) || (c == '%' && next == ':'))
+        if (c == '"' || c == '\'' || c == '#' || c == '\\' || c == 0 || c == '$' || c >= 0x80 || c == '/' || c == '%')
             m->special |= bit;
     }
     m->keyword_first = m->ident; /* a filter: here, no filter */
@@ -1147,12 +1146,44 @@ static const u8 *directive(Lexer *L, const u8 *p) {
 
 /* ---- blocks of plain code ---- */
 
+/* Trailing and leading zeros, 64 for 0, without a branch where the CPU has the instructions */
+static inline unsigned tz64(u64 x) {
+#if defined(__BMI__)
+    return (unsigned)_tzcnt_u64(x);
+#else
+    return x ? (unsigned)__builtin_ctzll(x) : 64;
+#endif
+}
+
+static inline unsigned lz64(u64 x) {
+#if defined(__LZCNT__)
+    return (unsigned)_lzcnt_u64(x);
+#else
+    return x ? (unsigned)__builtin_clzll(x) : 64;
+#endif
+}
+
 /* x with its bit order reversed, so that a carry runs from high bits to low ones */
 static inline u64 reverse_bits(u64 x) {
     x = __builtin_bswap64(x);
     x = (x >> 4 & 0x0F0F0F0F0F0F0F0FULL) | (x & 0x0F0F0F0F0F0F0F0FULL) << 4;
     x = (x >> 2 & 0x3333333333333333ULL) | (x & 0x3333333333333333ULL) << 2;
     return (x >> 1 & 0x5555555555555555ULL) | (x & 0x5555555555555555ULL) << 1;
+}
+
+/* Looks up the first word of starts and ends, which are its first and last bytes, and takes it out of them. If it is
+ * a keyword, sets its bits in the planes of its class XOR C_IDENT. */
+static inline void keyword_bits(const u8 *b, u64 *starts, u64 *ends, u64 plane[3]) {
+    static const u64 ALL[2] = {0, ~0ULL};
+    unsigned s = (unsigned)__builtin_ctzll(*starts);
+    unsigned e = (unsigned)__builtin_ctzll(*ends);
+    *starts &= *starts - 1;
+    *ends &= *ends - 1;
+    unsigned x = (unsigned)keyword_class(b + s, e - s + 1) ^ C_IDENT; /* 0 for an identifier: no branch on it */
+    u64 bits = (2ULL << e) - (1ULL << s);
+    plane[0] |= bits & ALL[x & 1];
+    plane[1] |= bits & ALL[x >> 1 & 1];
+    plane[2] |= bits & ALL[x >> 2];
 }
 
 /* One block of code at b: the input, or a padded copy of its last bytes, where real is the same place in the input.
@@ -1179,20 +1210,13 @@ static inline unsigned code_block(Lexer *L, const u8 *b, const u8 *real, u8 *o, 
     }
 
     /* The last word or number waits for the next block when only spaces follow it here: it might go on, or be a
-     * function */
-    u64 closed = ~(run | m.space);
-    u64 suffix = ~0ULL; /* the bytes after the last one that isn't a word character, dot or space */
-    if (closed >> 63)
-        suffix = 0;
-    else if (closed)
-        suffix <<= 64 - __builtin_clzll(closed);
-    unsigned tail = 64;
-    if (run & suffix) {
-        u64 below = ~run & ((1ULL << (63 - __builtin_clzll(run & suffix))) - 1);
-        tail = below ? 64 - (unsigned)__builtin_clzll(below) : 0;
-    }
+     * function. That is when the last byte that isn't a space is in a run, and tail is then where the run starts. */
+    unsigned gap = lz64(~m.space) & 63; /* the spaces at the end; 0 for all spaces, where run is 0 */
+    u64 in_run = (run << gap) >> 63;
+    unsigned start = 64 - lz64(~run & ~0ULL >> gap >> 1);
+    unsigned tail = 64 ^ ((64 ^ start) & (unsigned)-in_run); /* no branch */
 
-    unsigned stop = stops ? (unsigned)__builtin_ctzll(stops) : 64;
+    unsigned stop = tz64(stops);
     unsigned limit = stop < tail ? stop : tail;
     *special = stop < tail;
     if (limit && limit < 64 && (run >> (limit - 1) & 1)) { /* the word or number before the stop waits too */
@@ -1211,10 +1235,17 @@ static inline unsigned code_block(Lexer *L, const u8 *b, const u8 *real, u8 *o, 
     u64 word_ends = word & ~(word >> 1);
     u64 skip = m.space;
     u64 d0 = number & m.ident; /* the default class is C_IDENT, and C_CONSTANT is C_IDENT ^ 1 */
-    u64 d1 = 0;
-    u64 d2 = 0;
 
-    /* Functions: from each "(", back through spaces, to the word there. With the bits reversed, that is a carry from
+    /* After each word, the first byte that isn't a space. Each word has its own, in the same order, except that the
+     * last word's is lost when only spaces follow it here. */
+    u64 next = (skip + (word_ends << 1)) & ~skip;
+
+    /* Functions: the words whose next byte is "(". Where PDEP is fast, pick the bits of next that are "(", and put
+     * them at the words' starts, the k-th to the k-th word. */
+#if defined(__AVX2__) && defined(__BMI2__) && !defined(__znver1__) && !defined(__znver2__)
+    u64 functions = word & ~(word + _pdep_u64(_pext_u64(m.paren, next), word_starts));
+#else
+    /* Otherwise from each "(", back through spaces, to the word there. With the bits reversed, that is a carry from
      * each "(" through the spaces before it, and then through the word it lands on. */
 #if defined(__AVX2__) && defined(__GFNI__)
     __m256i three = _mm256_set_epi64x(0, (long long)m.paren, (long long)word, (long long)skip);
@@ -1230,10 +1261,10 @@ static inline unsigned code_block(Lexer *L, const u8 *b, const u8 *real, u8 *o, 
     u64 rland = (rskip + (reverse_bits(m.paren) << 1)) & ~rskip;
 #endif
     u64 functions = reverse_bits(rword & ~(rword + (rland & rword)));
+#endif
 
     /* A word followed by a byte where a comment, a splice or a NUL may hide needs lex_token's look: a special byte, or
      * the byte before one (a slash before a splice) */
-    u64 next = (skip + (word_ends << 1)) & ~skip; /* after each word, the first byte that isn't a space */
     u64 unsure = m.special | m.special >> 1 | (u64)(b[64] == '\\') << 63;
     for (u64 u = next & unsure & ~m.paren; u; u &= u - 1) {
         unsigned a = (unsigned)__builtin_ctzll(u);
@@ -1249,21 +1280,13 @@ static inline unsigned code_block(Lexer *L, const u8 *b, const u8 *real, u8 *o, 
     u64 kw_starts = word_starts & m.keyword_first;
     u64 candidates = word & ~(word + kw_starts); /* adding a word's start bit carries through it */
     u64 kw_ends = candidates & ~(candidates >> 1);
-    while (kw_starts) {
-        unsigned s = (unsigned)__builtin_ctzll(kw_starts);
-        unsigned e = (unsigned)__builtin_ctzll(kw_ends);
-        kw_starts &= kw_starts - 1;
-        kw_ends &= kw_ends - 1;
-        u64 x = (u64)keyword_class(b + s, e - s + 1) ^ C_IDENT; /* 0 for an identifier: no branch on it */
-        u64 bits = (2ULL << e) - (1ULL << s);
-        functions &= ~(bits & -(u64)(x != 0));
-        d0 |= bits & -(u64)(x & 1);
-        d1 |= bits & -(u64)(x >> 1 & 1);
-        d2 |= bits & -(u64)(x >> 2 & 1);
-    }
-    d0 |= functions; /* C_FUNCTION is C_IDENT ^ 7 */
-    d1 |= functions;
-    d2 |= functions;
+    u64 kw[3] = {0, 0, 0}; /* the keywords' bit planes */
+    while (kw_starts)
+        keyword_bits(b, &kw_starts, &kw_ends, kw);
+    functions &= ~(kw[0] | kw[1] | kw[2]);
+    d0 |= kw[0] | functions; /* C_FUNCTION is C_IDENT ^ 7 */
+    u64 d1 = kw[1] | functions;
+    u64 d2 = kw[2] | functions;
     store_classes(o, def, d0, d1, d2);
     for (u64 dots = number & m.dot; dots; dots &= dots - 1) /* a dot's default class is C_PUNCT, not C_IDENT */
         o[__builtin_ctzll(dots)] = C_CONSTANT;
