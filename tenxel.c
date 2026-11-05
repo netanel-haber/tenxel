@@ -24,7 +24,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#if defined(__AVX2__) || defined(__BMI__) || defined(__LZCNT__)
+#if defined(__AVX2__) || defined(__BMI__) || defined(__BMI2__) || defined(__LZCNT__)
 #include <immintrin.h>
 #endif
 
@@ -510,12 +510,16 @@ static inline void half_masks(__m256i v, __m256i next, u64 *m, __m256i *def) {
     const __m256i specials =
         _mm256_setr_epi8(0, -128, '"', '#', '$', '%', -128, '\'', -128, -128, -128, -128, '\\', -128, -128, '/', 0,
                          -128, '"', '#', '$', '%', -128, '\'', -128, -128, -128, -128, '\\', -128, -128, '/');
-    /* Word characters by nibbles: bit 1 is a digit (row 3), 2 the letters in rows 4 and 6, 4 those in rows 5 and 7,
-     * and 8 the _ */
-    const __m256i by_low = _mm256_setr_epi8(5, 7, 7, 7, 7, 7, 7, 7, 7, 7, 6, 2, 2, 2, 2, 10, 5, 7, 7, 7, 7, 7, 7, 7, 7,
-                                            7, 6, 2, 2, 2, 2, 10);
-    const __m256i by_high = _mm256_setr_epi8(0, 0, 0, 1, 2, 12, 2, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 12, 2, 4,
-                                             0, 0, 0, 0, 0, 0, 0, 0);
+    const __m256i newlines = _mm256_setr_epi8(-128, -128, -128, -128, -128, -128, -128, -128, -128, -128, '\n', -128,
+                                              -128, '\r', -128, -128, -128, -128, -128, -128, -128, -128, -128, -128,
+                                              -128, -128, '\n', -128, -128, '\r', -128, -128);
+    /* Word characters by nibbles: -128 (the sign bit) is a digit (row 3), 2 the letters in rows 4 and 6, 4 those in
+     * rows 5 and 7, and 8 the _ */
+    const __m256i by_low =
+        _mm256_setr_epi8(-124, -122, -122, -122, -122, -122, -122, -122, -122, -122, 6, 2, 2, 2, 2, 10, -124, -122,
+                         -122, -122, -122, -122, -122, -122, -122, -122, 6, 2, 2, 2, 2, 10);
+    const __m256i by_high = _mm256_setr_epi8(0, 0, 0, -128, 2, 12, 2, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, -128, 2, 12,
+                                             2, 4, 0, 0, 0, 0, 0, 0, 0, 0);
     __m256i high = _mm256_and_si256(_mm256_srli_epi16(v, 4), _mm256_set1_epi8(0x0F));
     __m256i kind = _mm256_and_si256(_mm256_shuffle_epi8(by_low, v), _mm256_shuffle_epi8(by_high, high));
     __m256i not_word = _mm256_cmpeq_epi8(kind, _mm256_setzero_si256());
@@ -542,15 +546,15 @@ static inline void half_masks(__m256i v, __m256i next, u64 *m, __m256i *def) {
     __m256i special = _mm256_or_si256(lookup_eq(v, specials), v); /* v: its sign bit marks bytes from 0x80 */
 
     m[0] = ~mask32(not_word) & 0xFFFFFFFF;
-    m[1] = mask32(_mm256_cmpeq_epi8(kind, _mm256_set1_epi8(1)));
+    m[1] = mask32(kind);
     m[2] = mask32(eq(v, '.'));
     m[3] = mask32(space);
-    m[4] = mask32(_mm256_or_si256(eq(v, '\n'), eq(v, '\r')));
+    m[4] = mask32(lookup_eq(v, newlines));
     m[5] = mask32(special);
     m[6] = mask32(eq(v, '('));
     m[7] = ~mask32(_mm256_cmpeq_epi8(first, _mm256_setzero_si256())) & 0xFFFFFFFF;
-    *def =
-        _mm256_andnot_si256(space, _mm256_blendv_epi8(_mm256_set1_epi8(C_IDENT), _mm256_set1_epi8(C_PUNCT), not_word));
+    __m256i word_or_punct = _mm256_and_si256(not_word, _mm256_set1_epi8(C_IDENT ^ C_PUNCT));
+    *def = _mm256_andnot_si256(space, _mm256_xor_si256(word_or_punct, _mm256_set1_epi8(C_IDENT)));
 }
 
 static inline void block_masks(const u8 *p, Masks *m, Block *def) {
@@ -1242,24 +1246,14 @@ static inline unsigned code_block(Lexer *L, const u8 *b, const u8 *real, u8 *o, 
 
     /* Functions: the words whose next byte is "(". Where PDEP is fast, pick the bits of next that are "(", and put
      * them at the words' starts, the k-th to the k-th word. */
-#if defined(__AVX2__) && defined(__BMI2__) && !defined(__znver1__) && !defined(__znver2__)
+#if defined(__BMI2__) && !defined(__znver1__) && !defined(__znver2__) /* Zen 1 and 2 have a slow PDEP */
     u64 functions = word & ~(word + _pdep_u64(_pext_u64(m.paren, next), word_starts));
 #else
     /* Otherwise from each "(", back through spaces, to the word there. With the bits reversed, that is a carry from
      * each "(" through the spaces before it, and then through the word it lands on. */
-#if defined(__AVX2__) && defined(__GFNI__)
-    __m256i three = _mm256_set_epi64x(0, (long long)m.paren, (long long)word, (long long)skip);
-    three = _mm256_gf2p8affine_epi64_epi8(three, _mm256_set1_epi64x((long long)0x8040201008040201ULL), 0);
-    three = _mm256_shuffle_epi8(three, _mm256_setr_epi8(7, 6, 5, 4, 3, 2, 1, 0, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5,
-                                                        4, 3, 2, 1, 0, 15, 14, 13, 12, 11, 10, 9, 8));
-    u64 rskip = (u64)_mm256_extract_epi64(three, 0);
-    u64 rword = (u64)_mm256_extract_epi64(three, 1);
-    u64 rland = (rskip + ((u64)_mm256_extract_epi64(three, 2) << 1)) & ~rskip;
-#else
     u64 rskip = reverse_bits(skip);
     u64 rword = reverse_bits(word);
     u64 rland = (rskip + (reverse_bits(m.paren) << 1)) & ~rskip;
-#endif
     u64 functions = reverse_bits(rword & ~(rword + (rland & rword)));
 #endif
 
