@@ -223,6 +223,140 @@ static inline int keyword_class(const u8 *w, size_t len) {
     return (int)(C_IDENT ^ ((k->cls ^ C_IDENT) & -same));
 }
 
+/* The keywords again, for the blocks: each key, a keyword's first 8 bytes read as a little-endian number (zero-padded
+ * if it is shorter), at the slot it hashes to, (key * WORD_MUL) >> 55. A slot's meta is len << 4 | longer << 3 |
+ * class ^ C_IDENT: the length and class of the keyword of up to 8 bytes with that key, if there is one, and whether a
+ * longer keyword starts with those 8 bytes. Made from KEYWORDS by words.py; exhaust.c checks it. */
+typedef struct {
+    u64 key;
+    u8 meta;
+} WordSlot;
+
+#define WORD_MUL 0x635F7F2ED95B796DULL
+static const WordSlot WORDS[512] = {
+    [2] = {0x656E696C6E695F5F, 141},   /* __inline... */
+    [10] = {0x74736E6F63, 85},         /* const */
+    [15] = {0x3832316D62695F5F, 134},  /* __ibm128 */
+    [19] = {0x5F6461657268545F, 8},    /* _Thread_... */
+    [20] = {0x64656E6769736E75, 134},  /* unsigned */
+    [34] = {0x6E7275746572, 101},      /* return */
+    [37] = {0x656C62756F64, 102},      /* double */
+    [40] = {0x6C5F646165726874, 8},    /* thread_l... */
+    [45] = {0x6163747361665F5F, 8},    /* __fastca... */
+    [46] = {0x63696D6F74415F, 117},    /* _Atomic */
+    [49] = {0x6D73615F5F, 85},         /* __asm */
+    [50] = {0x5F5F67616D695F5F, 133},  /* __imag__ */
+    [52] = {0x5F5F6D73615F5F, 117},    /* __asm__ */
+    [56] = {0x65736C65, 69},           /* else */
+    [58] = {0x636972656E65475F, 133},  /* _Generic */
+    [59] = {0x726F746365765F5F, 8},    /* __vector... */
+    [75] = {0x656E696C6E69, 101},      /* inline */
+    [79] = {0x6C636564635F5F, 117},    /* __cdecl */
+    [84] = {0x65757274, 65},           /* true */
+    [86] = {0x383231746E695F5F, 134},  /* __int128 */
+    [88] = {0x736E657478655F5F, 8},    /* __extens... */
+    [92] = {0x6E7265747865, 101},      /* extern */
+    [101] = {0x746E497469425F, 118},   /* _BitInt */
+    [111] = {0x615F636974617473, 8},   /* static_a... */
+    [112] = {0x72757465726F4E5F, 8},   /* _Noretur... */
+    [114] = {0x6F64, 37},              /* do */
+    [117] = {0x65736163, 69},          /* case */
+    [119] = {0x65736C6166, 81},        /* false */
+    [123] = {0x6F747561, 69},          /* auto */
+    [126] = {0x6572636E75665F5F, 8},   /* __funcre... */
+    [130] = {0x6C61636765725F5F, 8},   /* __regcal... */
+    [137] = {0x74616F6C66, 86},        /* float */
+    [142] = {0x72616863, 70},          /* char */
+    [155] = {0x6972747365725F5F, 8},   /* __restri... */
+    [160] = {0x6D756E65, 69},          /* enum */
+    [164] = {0x74736E6F635F5F, 117},   /* __const */
+    [166] = {0x6E6F696E75, 85},        /* union */
+    [170] = {0x6F746F67, 69},          /* goto */
+    [172] = {0x6974616C6F765F5F, 8},   /* __volati... */
+    [176] = {0x6B61657262, 85},        /* break */
+    [178] = {0x795F636A626F5F5F, 8},   /* __objc_y... */
+    [179] = {0x666F657079745F5F, 141}, /* __typeof... */
+    [183] = {0x6C6F6F62, 70},          /* bool */
+    [194] = {0x7274706C6C756E, 113},   /* nullptr */
+    [196] = {0x6C6165725F5F, 101},     /* __real */
+    [197] = {0x363170665F5F, 102},     /* __fp16 */
+    [201] = {0x666F6E67696C61, 117},   /* alignof */
+    [203] = {0x7469625F73695F5F, 8},   /* __is_bit... */
+    [206] = {0x5954544552505F5F, 8},   /* __PRETTY... */
+    [216] = {0x746E69, 54},            /* int */
+    [228] = {0x6461657268745F5F, 133}, /* __thread */
+    [234] = {0x616E6967616D495F, 8},   /* _Imagina... */
+    [238] = {0x746375727473, 101},     /* struct */
+    [244] = {0x6163736968745F5F, 8},   /* __thisca... */
+    [250] = {0x6269727474615F5F, 8},   /* __attrib... */
+    [266] = {0x745F6F7475615F5F, 8},   /* __auto_t... */
+    [271] = {0x746F6E5F73695F5F, 8},   /* __is_not... */
+    [273] = {0x7461766972705F5F, 8},   /* __privat... */
+    [278] = {0x3174616F6C665F5F, 8},   /* __float1... */
+    [285] = {0x73616E67696C61, 117},   /* alignas */
+    [290] = {0x363166625F5F, 102},     /* __bf16 */
+    [301] = {0x67616D695F5F, 101},     /* __imag */
+    [304] = {0x666F657A6973, 101},     /* sizeof */
+    [305] = {0x64656E676973, 102},     /* signed */
+    [312] = {0x656C706D6F635F5F, 8},   /* __comple... */
+    [322] = {0x6C616D696365445F, 8},   /* _Decimal... */
+    [325] = {0x5F6369746174535F, 8},   /* _Static_... */
+    [326] = {0x726F66, 53},            /* for */
+    [328] = {0x686374697773, 101},     /* switch */
+    [331] = {0x78656C706D6F435F, 134}, /* _Complex */
+    [334] = {0x6C6F6F425F, 86},        /* _Bool */
+    [338] = {0x6F6E67696C615F5F, 8},   /* __aligno... */
+    [339] = {0x6C6C756E6E6F4E5F, 133}, /* _Nonnull */
+    [340] = {0x6E5F636A626F5F5F, 8},   /* __objc_n... */
+    [341] = {0x66656465707974, 117},   /* typedef */
+    [342] = {0x65756E69746E6F63, 133}, /* continue */
+    [344] = {0x656C696877, 85},        /* while */
+    [346] = {0x64696F76, 70},          /* void */
+    [348] = {0x5F5F636E75665F5F, 133}, /* __func__ */
+    [353] = {0x6C62616C6C754E5F, 8},   /* _Nullabl... */
+    [355] = {0x5F6C6562616C5F5F, 8},   /* __label_... */
+    [360] = {0x6D7361, 53},            /* asm */
+    [366] = {0x70786574736E6F63, 8},   /* constexp... */
+    [367] = {0x6C61637361705F5F, 133}, /* __pascal */
+    [370] = {0x656C75646F6D5F5F, 8},   /* __module... */
+    [371] = {0x73616E67696C415F, 133}, /* _Alignas */
+    [378] = {0x4954434E55465F5F, 8},   /* __FUNCTI... */
+    [393] = {0x746E497478455F, 118},   /* _ExtInt */
+    [394] = {0x5F74736E6F635F5F, 8},   /* __const_... */
+    [403] = {0x7365645F73695F5F, 8},   /* __is_des... */
+    [413] = {0x6669, 37},              /* if */
+    [424] = {0x676E6F6C, 70},          /* long */
+    [425] = {0x666F6E67696C415F, 133}, /* _Alignof */
+    [429] = {0x6E755F6C6C754E5F, 8},   /* _Null_un... */
+    [435] = {0x7265747369676572, 133}, /* register */
+    [438] = {0x636974617473, 101},     /* static */
+    [439] = {0x656C6974616C6F76, 133}, /* volatile */
+    [440] = {0x755F666F65707974, 8},   /* typeof_u... */
+    [445] = {0x746C7561666564, 117},   /* default */
+    [452] = {0x69746C6975625F5F, 8},   /* __builti... */
+    [457] = {0x5F5F6C6165725F5F, 133}, /* __real__ */
+    [463] = {0x64656E6769735F5F, 142}, /* __signed... */
+    [478] = {0x74726F6873, 86},        /* short */
+    [485] = {0x7463697274736572, 133}, /* restrict */
+    [486] = {0x6C61636474735F5F, 8},   /* __stdcal... */
+    [503] = {0x666F65707974, 101},     /* typeof */
+    [511] = {0x363174616F6C465F, 134}, /* _Float16 */
+};
+
+/* The class of the word of len bytes at w, XOR C_IDENT: 0 for an identifier. Reads 16 bytes at w, or len if more.
+ * One lookup, and a branch only for the rare word whose first 8 bytes start a long keyword. */
+static inline unsigned word_class(const u8 *w, unsigned len) {
+    static const u64 MASK[9] = {
+        0, 0xFF, 0xFFFF, 0xFFFFFF, 0xFFFFFFFF, 0xFFFFFFFFFF, 0xFFFFFFFFFFFF, 0xFFFFFFFFFFFFFF, ~0ULL};
+    u64 key = load64(w) & MASK[len < 8 ? len : 8];
+    unsigned slot = (unsigned)((key * WORD_MUL) >> 55);
+    unsigned same = WORDS[slot].key == key;
+    unsigned meta = WORDS[slot].meta;
+    if (same & (meta >> 3) & (len > 8)) /* rare, so predicted well though it waits for the lookup */
+        return (unsigned)keyword_class(w, len) ^ C_IDENT;
+    return meta & 7 & -(same & ((meta >> 4) == len));
+}
+
 /* ---- Unicode: which code points can start an identifier, and which are whitespace ----
  * From clang/lib/Lex/UnicodeCharSets.h at llvmorg-19.1.7: ID_START is XIDStartRanges (Unicode 15.1) merged with
  * MathematicalNotationProfileIDStartRanges, without ASCII; UNICODE_SPACE is UnicodeWhitespaceCharRanges. */
@@ -476,7 +610,8 @@ static int peek(const u8 *p, const u8 *end, size_t *n) {
  * store_classes(): the default classes, XORed with bit planes. */
 typedef struct {
     u64 ident, digit, dot, space, newline, paren;
-    u64 keyword_first; /* bytes whose next one could follow it at the start of a keyword (no false negatives) */
+    u64 keyword_first; /* bytes whose next one could follow it at the start of a keyword (no false negatives): the
+                        * next is a letter, so words that start here are 3 bytes apart or more */
     u64 special; /* what blocks leave to lex_token: " ' # \ $ % / NUL and bytes from 0x80. A / or % in code is rare
                   * enough that it costs less to stop at each than to see whether it starts a comment or %: */
 } Masks;
@@ -629,7 +764,7 @@ static inline void block_masks(const u8 *p, Masks *m, Block *def) {
         if (c == '"' || c == '\'' || c == '#' || c == '\\' || c == 0 || c == '$' || c >= 0x80 || c == '/' || c == '%')
             m->special |= bit;
     }
-    m->keyword_first = m->ident; /* a filter: here, no filter */
+    m->keyword_first = m->ident & m->ident >> 1; /* a filter: here, just the words of 2 bytes or more */
     *def = p;
 }
 
@@ -1148,8 +1283,6 @@ static const u8 *directive(Lexer *L, const u8 *p) {
     }
 }
 
-/* ---- blocks of plain code ---- */
-
 /* Trailing and leading zeros, 64 for 0, without a branch where the CPU has the instructions */
 static inline unsigned tz64(u64 x) {
 #if defined(__BMI__)
@@ -1167,6 +1300,93 @@ static inline unsigned lz64(u64 x) {
 #endif
 }
 
+/* ---- the gaps between code: spaces, comments, and the directives after them ----
+ * After a stop, what follows is often spaces and then another comment or a directive. Blocks would take the spaces
+ * a block at a time, and stop at once at the comment: gap() takes them all here, with SIMD searches. */
+
+/* The spaces and newlines from p, painted. Stops at anything else, splices and NULs included, which lex_space takes;
+ * and, near the end, at once. */
+static const u8 *skip_spaces(Lexer *L, const u8 *p) {
+#if defined(__AVX2__)
+    const __m256i spaces =
+        _mm256_setr_epi8(' ', -128, -128, -128, -128, -128, -128, -128, -128, '\t', '\n', '\v', '\f', '\r', -128, -128,
+                         ' ', -128, -128, -128, -128, -128, -128, -128, -128, '\t', '\n', '\v', '\f', '\r', -128, -128);
+    const __m256i fill = _mm256_set1_epi8(C_SPACE);
+    while (L->end - p >= 32) {
+        __m256i v = _mm256_loadu_si256((const __m256i *)p);
+        uint32_t space = (uint32_t)_mm256_movemask_epi8(lookup_eq(v, spaces));
+        uint32_t newline = (uint32_t)_mm256_movemask_epi8(_mm256_or_si256(eq(v, '\n'), eq(v, '\r')));
+        _mm256_storeu_si256((__m256i *)(L->cls + (p - L->src)), fill); /* classes go left to right: what follows
+                                                                          gets its own later */
+        unsigned run = (unsigned)tz64(~(u64)space) & 63;               /* the spaces here, up to 32 */
+        if (newline & (uint32_t)((1ULL << run) - 1))
+            L->line_start = true;
+        p += run;
+        if (run < 32)
+            break;
+    }
+#else
+    (void)L;
+#endif
+    return p;
+}
+
+/* The block comment opened by the "/" "*" at start, painted as it is searched. Returns its end. */
+static const u8 *painted_comment(Lexer *L, const u8 *start) {
+    const u8 *end = L->end;
+    const u8 *q = NULL;
+#if defined(__AVX2__)
+    size_t n;
+    const u8 *i = start + 2;
+    if (end - i >= 65 && peek(i, end, &n) != -1 && n == 1) { /* not a splice first: block_comment_end takes that */
+        i += n - 1; /* pairs (i, i + 1) where i + 1 might be the closing slash, as in block_comment_end */
+        const __m256i fill = _mm256_set1_epi8(C_COMMENT);
+        u8 *o = L->cls + (start - L->src);
+        _mm256_storeu_si256((__m256i *)o, fill); /* start to start + 31, past i + 1: and start + 32 < end */
+        while (end - i >= 65) {
+            Block v = vec_load(i);
+            Block w = vec_load(i + 1);
+            u8 *oi = L->cls + (i + 1 - L->src); /* i + 1 to i + 64, where the closing slash might be */
+            _mm256_storeu_si256((__m256i *)oi, fill);
+            _mm256_storeu_si256((__m256i *)(oi + 32), fill);
+            u64 m = vec_eq(w, '/') & (vec_eq(v, '*') | vec_eq(v, '\n') | vec_eq(v, '\r'));
+            for (; m; m &= m - 1) {
+                const u8 *s = i + __builtin_ctzll(m) + 1;
+                if (s[-1] == '*' || star_splice_before(start, s - 1))
+                    return s + 1; /* the stores went past it */
+            }
+            i += 64;
+        }
+    }
+#endif
+    q = block_comment_end(start, start + 2, end);
+    paint(L, start, q, C_COMMENT);
+    return q;
+}
+
+/* Spaces, comments and the start of a directive, from p in code. Returns where something else starts: code, a
+ * directive's first token after its #, or what only lex_token takes. */
+static const u8 *gap(Lexer *L, const u8 *p) {
+    for (;;) {
+        p = skip_spaces(L, p);
+        if (L->end - p < 2)
+            return p;
+        if (p[0] == '/' && p[1] == '*') {
+            p = painted_comment(L, p);
+        } else if (p[0] == '/' && p[1] == '/') {
+            const u8 *q = line_comment_end(p + 2, L->end);
+            paint(L, p, q, C_COMMENT);
+            p = q;
+        } else if (p[0] == '#' && L->line_start) {
+            return lex_token(L, p); /* the #, which starts a directive */
+        } else {
+            return p;
+        }
+    }
+}
+
+/* ---- blocks of plain code ---- */
+
 /* x with its bit order reversed, so that a carry runs from high bits to low ones */
 static inline u64 reverse_bits(u64 x) {
     x = __builtin_bswap64(x);
@@ -1175,19 +1395,15 @@ static inline u64 reverse_bits(u64 x) {
     return (x >> 1 & 0x5555555555555555ULL) | (x & 0x5555555555555555ULL) << 1;
 }
 
-/* Looks up the first word of starts and ends, which are its first and last bytes, and takes it out of them. If it is
- * a keyword, sets its bits in the planes of its class XOR C_IDENT. */
-static inline void keyword_bits(const u8 *b, u64 *starts, u64 *ends, u64 plane[3]) {
-    static const u64 ALL[2] = {0, ~0ULL};
+/* Looks up the first word of *starts and *ends, which are its first and last bytes, and takes it out of them. Its
+ * class XOR C_IDENT, 3 bits, goes into *found at its first byte: words start at least 3 bytes apart. With no words
+ * left, it looks up a 1-byte word at b, which is never a keyword. */
+static inline void look_up(const u8 *b, u64 *starts, u64 *ends, u64 *found) {
     unsigned s = (unsigned)__builtin_ctzll(*starts);
     unsigned e = (unsigned)__builtin_ctzll(*ends);
     *starts &= *starts - 1;
     *ends &= *ends - 1;
-    unsigned x = (unsigned)keyword_class(b + s, e - s + 1) ^ C_IDENT; /* 0 for an identifier: no branch on it */
-    u64 bits = (2ULL << e) - (1ULL << s);
-    plane[0] |= bits & ALL[x & 1];
-    plane[1] |= bits & ALL[x >> 1 & 1];
-    plane[2] |= bits & ALL[x >> 2];
+    *found |= (u64)word_class(b + s, e - s + 1) << s;
 }
 
 /* One block of code at b: the input, or a padded copy of its last bytes, where real is the same place in the input.
@@ -1270,13 +1486,18 @@ static inline unsigned code_block(Lexer *L, const u8 *b, const u8 *real, u8 *o, 
     }
 
     /* Keywords, among the words whose first two letters could start one. A keyword followed by "(" is still a
-     * keyword. */
+     * keyword. The first three lookups have no branch: a loop over a block's words, whose number is hard to predict,
+     * would end in a mispredicted branch about once a block, and cost more than the lookups. */
     u64 kw_starts = word_starts & m.keyword_first;
     u64 candidates = word & ~(word + kw_starts); /* adding a word's start bit carries through it */
     u64 kw_ends = candidates & ~(candidates >> 1);
-    u64 kw[3] = {0, 0, 0}; /* the keywords' bit planes */
-    while (kw_starts)
-        keyword_bits(b, &kw_starts, &kw_ends, kw);
+    u64 left = kw_starts;
+    u64 found = 0;
+    while (left)
+        look_up(b, &left, &kw_ends, &found);
+    u64 kw[3]; /* the keywords' bit planes: each start bit of found, carried through its word */
+    for (int i = 0; i < 3; i++)
+        kw[i] = word & ~(word + (found >> i & kw_starts));
     functions &= ~(kw[0] | kw[1] | kw[2]);
     d0 |= kw[0] | functions; /* C_FUNCTION is C_IDENT ^ 7 */
     u64 d1 = kw[1] | functions;
@@ -1302,9 +1523,12 @@ void tenxel_classify(const u8 *src, size_t n, u8 *cls) {
         p += 3;
     }
 
+    p = gap(&L, p);
     while (p < L.end) {
         if (L.directive) {
             p = directive(&L, p);
+            if (!L.directive)
+                p = gap(&L, p);
             continue;
         }
 
@@ -1328,8 +1552,19 @@ void tenxel_classify(const u8 *src, size_t n, u8 *cls) {
         if (p >= L.end || (limit && !special))
             continue;
 
-        /* One token that a block can't take, or, when a whole block is words and spaces, tokens for a while */
-        const u8 *until = special ? p : p + 64;
+        /* A stop: a comment or directive goes to gap(), and one other token to lex_token, and then the gap after
+         * it. When a whole block is words and spaces, tokens for a while. */
+        if (special) {
+            const u8 *q = gap(&L, p);
+            if (q == p && !L.directive) {
+                q = lex_token(&L, p);
+                if (!L.directive)
+                    q = gap(&L, q);
+            }
+            p = q;
+            continue;
+        }
+        const u8 *until = p + 64;
         do
             p = lex_token(&L, p);
         while (p < until && p < L.end && !L.directive);

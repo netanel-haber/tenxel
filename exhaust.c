@@ -13,6 +13,27 @@
 static const u8 ALPHABET[] = {'/', '*', '"', '\'', '\\', '\n', '#', '(', ' ', '.', 'u', '0', 'e', '+', '%', ':'};
 #define N_ALPHABET sizeof ALPHABET
 
+/* The blocks' keyword table (WORDS, made by words.py) against keyword_class, which lex_token uses:
+ * every keyword, each of its prefixes, and it with a letter more */
+static int check_words(void) {
+    for (size_t i = 0; i < KEYWORD_SLOTS; i++) {
+        size_t len = strlen(KEYWORDS[i].word);
+        u8 w[80] = {0};
+        memcpy(w, KEYWORDS[i].word, len);
+        w[len] = 'x';
+        for (size_t l = 1; l <= len + 1; l++) {
+            int want = keyword_class(w, l);
+            int got = (int)word_class(w, (unsigned)l) ^ C_IDENT;
+            if (len && want != got) {
+                printf("MISMATCH: the word table says %d for %.*s, keyword_class %d: run words.py\n", got, (int)l, w,
+                       want);
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
 static void classify_plain(const u8 *src, size_t n, u8 *cls) {
     Lexer L = {src, src + n, cls, true, false};
     const u8 *p = src;
@@ -26,6 +47,8 @@ int main(int argc, char **argv) {
         return 2;
     }
     int max = atoi(argv[1]);
+    if (check_words())
+        return 1;
     long page = sysconf(_SC_PAGESIZE);
     u8 *m = mmap(0, 3 * page, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     mprotect(m + 2 * page, page, PROT_NONE);
